@@ -45,3 +45,6 @@ frontend/dist/renders/
 *~
 
 *_workspace/
+
+# Local dxl shim commit: pytest cache from the shim suite
+.pytest_cache/

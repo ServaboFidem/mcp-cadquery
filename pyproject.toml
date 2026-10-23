@@ -10,7 +10,9 @@ authors = [
 ]
 description = "A FastAPI MCP server for CadQuery operations"
 readme = "README.md"
-requires-python = ">=3.10"
+# Bumped from >=3.10 by the local dxl shim commit: the FastMCP stdio shim
+# (src/cadquery_dxl_mcp) is verified on 3.12 only (.python-version pins it).
+requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License", # Choose appropriate license
@@ -19,6 +21,8 @@ classifiers = [
 # Dependencies moved from requirements.txt
 dependencies = [
     "cadquery==2.5.2",
+    # Local dxl shim commit: the FastMCP stdio shim needs the MCP SDK.
+    "mcp>=2.2",
     "fastapi",
     "uvicorn[standard]",
     "sse-starlette",
@@ -36,6 +40,9 @@ test = [
 [project.scripts]
 # This creates the 'mcp-cadquery' command that points to the Typer app
 mcp-cadquery = "mcp_cadquery_server.cli:cli"
+# Local dxl shim commit: the FastMCP stdio shim entry point (dxl-mcp-proxy
+# spawns this, never the Typer app -- see docs/superpowers/specs/2026-10-23-cadquery-mcp-design.md).
+cadquery-dxl-mcp = "cadquery_dxl_mcp.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]  # Look for packages in src/
