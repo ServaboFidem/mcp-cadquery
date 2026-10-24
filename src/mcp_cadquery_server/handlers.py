@@ -37,7 +37,12 @@ from .state import (
     ACTIVE_PART_LIBRARY_DIR, # Use active config paths
     ACTIVE_OUTPUT_DIR_PATH,
     ACTIVE_RENDER_DIR_PATH,
-    ACTIVE_PART_PREVIEW_DIR_PATH
+    ACTIVE_PART_PREVIEW_DIR_PATH,
+    # Local dxl fork delta: upstream referenced this bare name at the SVG
+    # export branch without importing it (NameError on every SVG export,
+    # on upstream's own servers too). None disables the static-URL branch,
+    # which is correct here -- no frontend is served.
+    ACTIVE_STATIC_DIR
 )
 
 def handle_execute_cadquery_script(args: ExecuteCadqueryScriptArgs, request_id: str = "unknown") -> dict:
