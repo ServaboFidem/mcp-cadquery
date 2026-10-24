@@ -47,10 +47,52 @@ def _drop_upstream_modules() -> None:
 
 
 @pytest.fixture
-def server_context(workspace_root: Path, loaded_upstream):
+def server_context(workspace_root: Path, loaded_upstream, stub_store):
     from cadquery_dxl_mcp.server import ServerContext
 
-    return ServerContext(workspace_root=workspace_root, upstream=loaded_upstream)
+    return ServerContext(
+        workspace_root=workspace_root,
+        upstream=loaded_upstream,
+        artifact_store=stub_store,
+    )
+
+
+class _StubS3:
+    """Recording stand-in for a boto3 S3 client (no network, no credentials)."""
+
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], dict] = {}
+
+    def put_object(self, Bucket, Key, Body, ContentType=None):
+        data = Body.read() if hasattr(Body, "read") else bytes(Body)
+        self.objects[(Bucket, Key)] = {"data": data, "content_type": ContentType}
+        return {}
+
+    def generate_presigned_url(self, operation, Params, ExpiresIn):
+        return (
+            f"https://fake-r2/{Params['Bucket']}/{Params['Key']}"
+            f"?expires={ExpiresIn}"
+        )
+
+
+@pytest.fixture
+def stub_s3():
+    return _StubS3()
+
+
+@pytest.fixture
+def stub_store(stub_s3):
+    from cadquery_dxl_mcp.artifact_upload import ArtifactStore
+
+    return ArtifactStore(
+        endpoint="https://fake-r2.example",
+        bucket="fake-bucket",
+        region="auto",
+        prefix="cadquery/",
+        access_key="fake-access",
+        secret_key="fake-secret",
+        client_factory=lambda: stub_s3,
+    )
 
 
 @pytest.fixture(autouse=True)

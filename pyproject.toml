@@ -23,6 +23,10 @@ dependencies = [
     "cadquery==2.5.2",
     # Local dxl shim commit: the FastMCP stdio shim needs the MCP SDK.
     "mcp>=2.2",
+    # Local dxl shim commit: export tools upload to R2 artifact storage
+    # direct from the child (bytes bypass MCP), so every export needs a
+    # presigned download link. boto3 is the uploader (R2 is S3-compatible).
+    "boto3",
     "fastapi",
     "uvicorn[standard]",
     "sse-starlette",

@@ -26,7 +26,16 @@ class InvalidFilenameError(ShimError):
 
 
 class UnsupportedFormatError(ShimError):
-    """A binary-only export (STL in v1) was requested; STEP is the supported interchange."""
+    """An export format outside {STEP, STL} (inferred from extension when omitted)."""
+
+
+class ArtifactUploadError(ShimError):
+    """An export could not be uploaded to R2 artifact storage.
+
+    Tool-level ``isError``: the export itself may have succeeded, but a
+    remote caller without the bytes has nothing. The key that failed is
+    named; secret values never are.
+    """
 
 
 class UpstreamToolError(ShimError):

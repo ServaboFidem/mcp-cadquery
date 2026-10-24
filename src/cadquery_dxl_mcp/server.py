@@ -6,14 +6,15 @@ code stays out of the process entirely -- only the handler seam in
 
 Envelope rules (the spec's fixed floor):
 - Success returns upstream's ``result`` verbatim as JSON text.
-- Export tools (``export_shape``, ``export_shape_to_svg``) append the
-  exported file as a second text block -- STEP/SVG as UTF-8 text, STL
-  base64-encoded (binary bytes are not valid artifact text, base64 is, so
-  the proxy's spillover + S3 mirror carry it like any large result). The
-  summary names the encoding; the file is read back only from the jailed
-  location the export just wrote, never from a caller-supplied path.
-- Every tool failure -- jail rejection, unsupported format, upstream
-  ``tool_error``, bad arguments -- is ``CallToolResult(is_error=True)``.
+- Export tools (``export_shape``, ``export_shape_to_svg``) upload the file
+  to R2 artifact storage and return the summary plus a presigned download
+  URL: bytes bypass MCP entirely (multi-megabyte STL never transits JSON),
+  and remote callers get a link they can actually fetch. The upload reads
+  back only the jailed location the export just wrote, never a
+  caller-supplied path; without a configured store every export is
+  ``isError``.
+- Every tool failure -- jail rejection, unsupported format, upload failure,
+  upstream ``tool_error``, bad arguments -- is ``CallToolResult(is_error=True)``.
   Tool failures are never transport errors; the backend keeps serving.
 - Upstream runs in a worker thread (``anyio.to_thread``), so a long OCC call
   honors cancellation: the waiter is freed while the next call still gets a
@@ -22,7 +23,6 @@ Envelope rules (the spec's fixed floor):
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import uuid
@@ -37,6 +37,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 
 from . import __version__
+from .artifact_upload import ArtifactStore, object_key, upload_file
 from .errors import ShimError
 from .upstream import Upstream, dispatch
 from .workspace import (
@@ -84,8 +85,8 @@ _WORKSPACE_REQUIRED = frozenset(
 
 _DESCRIPTIONS = {
     "execute_cadquery_script": "Run a CadQuery script in the workspace; returns a result_id for later export and inspection.",
-    "export_shape": "Export a built shape and return its bytes: STEP as text, STL base64-encoded.",
-    "export_shape_to_svg": "Render a built shape and return the SVG text.",
+    "export_shape": "Export a built shape; returns an R2 download URL (STEP, STL).",
+    "export_shape_to_svg": "Render a built shape; returns an R2 download URL (SVG).",
     "scan_part_library": "Index the part library under the workspace.",
     "search_parts": "Search indexed part metadata (read-only).",
     "save_workspace_module": "Save a .py helper module into the workspace.",
@@ -96,10 +97,16 @@ _DESCRIPTIONS = {
 
 @dataclass(frozen=True)
 class ServerContext:
-    """Everything a tool call needs: the jail root and the loaded upstream seam."""
+    """Everything a tool call needs: jail root, upstream seam, R2 store.
+
+    ``artifact_store`` is ``None`` when the child runs without ``--env-file``
+    (tests, unconfigured deploys): export tools then fail as ``isError``
+    naming artifact storage instead of uploading.
+    """
 
     workspace_root: Path
     upstream: Upstream
+    artifact_store: ArtifactStore | None = None
 
 
 def _new_request_id() -> str:
@@ -191,22 +198,39 @@ async def execute_tool(
         log.info("tool %r failed: %s", tool_name, exc)
         return _tool_error(str(exc))
     if tool_name in ("export_shape", "export_shape_to_svg"):
-        return _export_result(ctx, tool_name, jailed, result)
+        return await anyio.to_thread.run_sync(
+            lambda: _export_artifact(ctx, tool_name, jailed, result, request_id)
+        )
     return _ok(result)
 
 
-def _export_result(
-    ctx: ServerContext, tool_name: str, jailed: Mapping[str, Any], result: Any
+def _export_artifact(
+    ctx: ServerContext,
+    tool_name: str,
+    jailed: Mapping[str, Any],
+    result: Any,
+    request_id: str,
 ) -> CallToolResult:
-    """Attach the exported file to a successful export call.
+    """Upload an exported file to R2 artifact storage; return the link.
 
-    The file is read back ONLY from the jailed location -- the shim-computed
-    ``exports/`` path for ``export_shape``, or the upstream-reported path
-    re-validated under the workspace root for SVG. A result that points
-    outside the root, or at a file that is not there, is an ``isError``:
-    the export did not land where the jail guarantees, and serving a path
-    the caller cannot use (or bytes from elsewhere) would be worse.
+    Remote callers cannot read server-side paths, and multi-megabyte STL
+    must not transit the JSON tool result, so the bytes go direct to R2
+    (the real-esrgan shape) and the result stays a small summary with a
+    presigned download URL. The file is read ONLY from the jailed
+    location -- the shim-computed ``exports/`` path for ``export_shape``,
+    or the upstream-reported path re-validated under the workspace root
+    for SVG. A result that points outside the root, or at a file that is
+    not there, is an ``isError``: the export did not land where the jail
+    guarantees. Without a configured store (no ``--env-file``) every
+    export is an ``isError`` naming artifact storage.
     """
+    from .errors import ArtifactUploadError
+
+    store = ctx.artifact_store
+    if store is None:
+        return _tool_error(
+            f"{tool_name} needs artifact storage (no --env-file configured)"
+        )
     if tool_name == "export_shape":
         raw: Any = jailed.get("filename")
     elif isinstance(result, dict):
@@ -222,38 +246,32 @@ def _export_result(
         path.resolve().relative_to(ctx.workspace_root.resolve())
     except (OSError, ValueError):
         return _tool_error(f"{tool_name} filename escapes the workspace")
-    try:
-        data = path.read_bytes()
-    except OSError:
+    if not path.is_file():
         return _tool_error(f"{tool_name} output file is missing: {path.name}")
-    if path.suffix.lower() == ".stl":
-        payload = base64.b64encode(data).decode("ascii")
-        encoding = "base64"
+    suffix = path.suffix.lower()
+    if suffix == ".stl":
         media_type = "model/stl"
+    elif suffix == ".svg" or tool_name == "export_shape_to_svg":
+        media_type = "image/svg+xml"
     else:
-        try:
-            payload = data.decode("utf-8")
-            encoding = "utf-8"
-        except UnicodeDecodeError:
-            payload = base64.b64encode(data).decode("ascii")
-            encoding = "base64"
-        media_type = "model/step" if tool_name == "export_shape" else "image/svg+xml"
+        media_type = "model/step"
+    name = f"{request_id}/{path.name}"
+    try:
+        size = path.stat().st_size
+        key, url = upload_file(store, path, name, media_type)
+    except ArtifactUploadError as exc:
+        return _tool_error(str(exc))
     summary = dict(result) if isinstance(result, dict) else {"result": result}
     summary.update(
         {
-            "content_encoding": encoding,
-            "content_media_type": media_type,
-            "content_bytes": len(data),
             "content_filename": path.name,
+            "content_bytes": size,
+            "content_media_type": media_type,
+            "artifact_key": key,
+            "artifact_url": url,
         }
     )
-    return CallToolResult(
-        content=[
-            TextContent(type="text", text=_result_text(summary)),
-            TextContent(type="text", text=payload),
-        ],
-        is_error=False,
-    )
+    return _ok(summary)
 
 
 def _present(arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -268,7 +286,7 @@ def build_server(ctx: ServerContext) -> MCPServer:
         instructions=(
             "Parametric CAD (CadQuery/OCC) inside a workspace jail. "
             "Every server-side path stays under the workspace root; "
-            "exports return their bytes (STEP/SVG as text, STL base64)."
+            "exports return an R2 download URL (STEP, STL, SVG)."
         ),
     )
 

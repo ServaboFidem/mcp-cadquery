@@ -3,7 +3,7 @@
 Production spawn (never ``uv run`` -- a grandchild python would outlive the
 supervisor's ``kill_on_drop``)::
 
-    <venv>\\Scripts\\python.exe -I -m cadquery_dxl_mcp serve --workspace-dir <data_dir>\\cadquery\\workspace
+    <venv>\\Scripts\\python.exe -I -m cadquery_dxl_mcp serve --workspace-dir <data_dir>\\cadquery\\workspace --env-file <data_dir>\\cadquery\\cadquery.env
 
 Stdout carries only MCP frames. Logging goes to stderr as JSON lines.
 ``serve`` fails closed: a missing workspace root or a failed CadQuery import
@@ -48,7 +48,9 @@ def _configure_logging() -> None:
     root.setLevel(logging.INFO)
 
 
-def build_prod_spawn(python_exe: str, workspace_dir: str) -> list[str]:
+def build_prod_spawn(
+    python_exe: str, workspace_dir: str, env_file: str
+) -> list[str]:
     """The exact production argv: direct venv python, isolated, module serve."""
     return [
         python_exe,
@@ -58,10 +60,13 @@ def build_prod_spawn(python_exe: str, workspace_dir: str) -> list[str]:
         "serve",
         "--workspace-dir",
         workspace_dir,
+        "--env-file",
+        env_file,
     ]
 
 
-def serve(workspace_dir: str) -> None:
+def serve(workspace_dir: str, env_file: str | None = None) -> None:
+    from .artifact_upload import load_store
     from .server import ServerContext, build_server
     from .upstream import UPSTREAM_SRC_ENV, load_upstream, upstream_src_override
 
@@ -83,7 +88,11 @@ def serve(workspace_dir: str) -> None:
         raise SystemExit(
             f"cadquery import failed: {type(exc).__name__}: {exc}"
         ) from None
-    ctx = ServerContext(workspace_root=root, upstream=load_upstream())
+    ctx = ServerContext(
+        workspace_root=root, upstream=load_upstream(), artifact_store=load_store(env_file)
+    )
+    if env_file is not None and ctx.artifact_store is None:
+        print("warning: --env-file given but artifact storage is not configured (missing/unreadable file or blank endpoint/bucket/keys); export tools will fail until it is fixed", file=sys.stderr)
     server = build_server(ctx)
     asyncio.run(server.run_stdio_async())
 
@@ -93,9 +102,10 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="cadquery-dxl-mcp")
     parser.add_argument("command", choices=("serve",))
     parser.add_argument("--workspace-dir", required=True)
+    parser.add_argument("--env-file", default=None)
     ns = parser.parse_args(argv)
     if ns.command == "serve":
-        serve(ns.workspace_dir)
+        serve(ns.workspace_dir, ns.env_file)
 
 
 if __name__ == "__main__":

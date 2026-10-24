@@ -36,6 +36,7 @@ def test_prod_spawn_shape_is_direct_python_never_uv_run(tmp_path: Path):
     argv = build_prod_spawn(
         python_exe="D:\\data\\mcps\\cadquery\\.venv\\Scripts\\python.exe",
         workspace_dir="D:\\data\\cadquery\\workspace",
+        env_file="D:\\data\\cadquery\\cadquery.env",
     )
     assert argv == [
         "D:\\data\\mcps\\cadquery\\.venv\\Scripts\\python.exe",
@@ -45,6 +46,8 @@ def test_prod_spawn_shape_is_direct_python_never_uv_run(tmp_path: Path):
         "serve",
         "--workspace-dir",
         "D:\\data\\cadquery\\workspace",
+        "--env-file",
+        "D:\\data\\cadquery\\cadquery.env",
     ]
     assert not any("uv" in part for part in argv)
 
