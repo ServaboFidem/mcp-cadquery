@@ -6,9 +6,15 @@ code stays out of the process entirely -- only the handler seam in
 
 Envelope rules (the spec's fixed floor):
 - Success returns upstream's ``result`` verbatim as JSON text.
-- Every tool failure -- jail rejection, STL request, upstream ``tool_error``,
-  bad arguments -- is ``CallToolResult(is_error=True)``. Tool failures are
-  never transport errors; the backend keeps serving.
+- Export tools (``export_shape``, ``export_shape_to_svg``) append the
+  exported file as a second text block -- STEP/SVG as UTF-8 text, STL
+  base64-encoded (binary bytes are not valid artifact text, base64 is, so
+  the proxy's spillover + S3 mirror carry it like any large result). The
+  summary names the encoding; the file is read back only from the jailed
+  location the export just wrote, never from a caller-supplied path.
+- Every tool failure -- jail rejection, unsupported format, upstream
+  ``tool_error``, bad arguments -- is ``CallToolResult(is_error=True)``.
+  Tool failures are never transport errors; the backend keeps serving.
 - Upstream runs in a worker thread (``anyio.to_thread``), so a long OCC call
   honors cancellation: the waiter is freed while the next call still gets a
   clean stream.
@@ -16,6 +22,7 @@ Envelope rules (the spec's fixed floor):
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import uuid
@@ -77,8 +84,8 @@ _WORKSPACE_REQUIRED = frozenset(
 
 _DESCRIPTIONS = {
     "execute_cadquery_script": "Run a CadQuery script in the workspace; returns a result_id for later export and inspection.",
-    "export_shape": "Export a built shape to STEP text (STL is not served in v1; request STEP).",
-    "export_shape_to_svg": "Render a built shape to SVG text.",
+    "export_shape": "Export a built shape and return its bytes: STEP as text, STL base64-encoded.",
+    "export_shape_to_svg": "Render a built shape and return the SVG text.",
     "scan_part_library": "Index the part library under the workspace.",
     "search_parts": "Search indexed part metadata (read-only).",
     "save_workspace_module": "Save a .py helper module into the workspace.",
@@ -183,7 +190,70 @@ async def execute_tool(
     except ShimError as exc:
         log.info("tool %r failed: %s", tool_name, exc)
         return _tool_error(str(exc))
+    if tool_name in ("export_shape", "export_shape_to_svg"):
+        return _export_result(ctx, tool_name, jailed, result)
     return _ok(result)
+
+
+def _export_result(
+    ctx: ServerContext, tool_name: str, jailed: Mapping[str, Any], result: Any
+) -> CallToolResult:
+    """Attach the exported file to a successful export call.
+
+    The file is read back ONLY from the jailed location -- the shim-computed
+    ``exports/`` path for ``export_shape``, or the upstream-reported path
+    re-validated under the workspace root for SVG. A result that points
+    outside the root, or at a file that is not there, is an ``isError``:
+    the export did not land where the jail guarantees, and serving a path
+    the caller cannot use (or bytes from elsewhere) would be worse.
+    """
+    if tool_name == "export_shape":
+        raw: Any = jailed.get("filename")
+    elif isinstance(result, dict):
+        raw = result.get("filename")
+    else:
+        raw = None
+    if not isinstance(raw, str) or not raw:
+        return _tool_error(f"{tool_name} returned no filename")
+    try:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = ctx.workspace_root / path
+        path.resolve().relative_to(ctx.workspace_root.resolve())
+    except (OSError, ValueError):
+        return _tool_error(f"{tool_name} filename escapes the workspace")
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return _tool_error(f"{tool_name} output file is missing: {path.name}")
+    if path.suffix.lower() == ".stl":
+        payload = base64.b64encode(data).decode("ascii")
+        encoding = "base64"
+        media_type = "model/stl"
+    else:
+        try:
+            payload = data.decode("utf-8")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            payload = base64.b64encode(data).decode("ascii")
+            encoding = "base64"
+        media_type = "model/step" if tool_name == "export_shape" else "image/svg+xml"
+    summary = dict(result) if isinstance(result, dict) else {"result": result}
+    summary.update(
+        {
+            "content_encoding": encoding,
+            "content_media_type": media_type,
+            "content_bytes": len(data),
+            "content_filename": path.name,
+        }
+    )
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=_result_text(summary)),
+            TextContent(type="text", text=payload),
+        ],
+        is_error=False,
+    )
 
 
 def _present(arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -198,7 +268,7 @@ def build_server(ctx: ServerContext) -> MCPServer:
         instructions=(
             "Parametric CAD (CadQuery/OCC) inside a workspace jail. "
             "Every server-side path stays under the workspace root; "
-            "exports are STEP/SVG text; STL is not served."
+            "exports return their bytes (STEP/SVG as text, STL base64)."
         ),
     )
 

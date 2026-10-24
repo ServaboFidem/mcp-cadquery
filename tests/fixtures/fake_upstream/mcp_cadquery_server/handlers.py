@@ -14,6 +14,7 @@ fake raises once, for the isError tests.
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -65,16 +66,36 @@ def _dict_handler(tool_name: str):
             {"tool": tool_name, "request_id": request.get("request_id"), "args": args}
         )
         if tool_name == "export_shape":
+            # Mirror upstream: the file lands at the (jailed, absolute) path
+            # the shim passes in. Canned bytes by extension so the shim's
+            # content-attachment path is exercised: text for STEP, raw
+            # binary for STL.
+            target = args.get("filename", "")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if target.lower().endswith(".stl"):
+                with open(target, "wb") as fh:
+                    fh.write(b"FAKE-STL\x00\x01\x02-BINARY")
+            else:
+                with open(target, "w", encoding="utf-8") as fh:
+                    fh.write("fake-step-content")
             return {
                 "success": True,
                 "message": "fake export ok",
-                "filename": args.get("filename"),
+                "filename": target,
             }
         if tool_name == "export_shape_to_svg":
+            # Mirror upstream: basename resolved under
+            # <workspace>/shapes/renders/, absolute path returned.
+            ws = args.get("workspace_path", "")
+            name = args.get("filename") or "fake.svg"
+            target = os.path.join(ws, "shapes", "renders", name)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("fake-svg-content")
             return {
                 "success": True,
                 "message": "fake svg ok",
-                "filename": args.get("filename"),
+                "filename": target,
             }
         if tool_name == "scan_part_library":
             return {"success": True, "parts": []}

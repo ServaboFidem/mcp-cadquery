@@ -87,22 +87,30 @@ def test_export_filename_rejected(evil):
         workspace.check_export_filename(evil)
 
 
-def test_stl_format_rejected_naming_step():
-    with pytest.raises(errors.UnsupportedFormatError) as exc_info:
-        workspace.check_export_format("STL")
-    assert "STEP" in str(exc_info.value)
+def test_stl_format_allowed_naming_step():
+    assert workspace.check_export_format("STL") == "STL"
+    assert workspace.check_export_format("stl") == "STL"
 
 
-def test_stl_extension_without_format_rejected():
-    with pytest.raises(errors.UnsupportedFormatError) as exc_info:
-        workspace.check_export_format(None, filename="part.stl")
-    assert "STEP" in str(exc_info.value)
+def test_stl_extension_without_format_infers_stl():
+    assert workspace.check_export_format(None, filename="part.stl") == "STL"
 
 
-@pytest.mark.parametrize("ok", [None, "", "STEP", "step", "Step", "svg"])
+def test_step_extension_without_format_infers_step():
+    assert workspace.check_export_format(None, filename="part.step") == "STEP"
+
+
+def test_unknown_format_rejected():
+    with pytest.raises(errors.UnsupportedFormatError):
+        workspace.check_export_format("OBJ")
+    with pytest.raises(errors.UnsupportedFormatError):
+        workspace.check_export_format("svg", filename="part.svg")
+
+
+@pytest.mark.parametrize("ok", [None, "", "STEP", "step", "Step", "STL", "stl"])
 def test_supported_formats_pass(ok):
     workspace.check_export_format(
-        ok, filename="part.step" if ok != "svg" else "part.svg"
+        ok, filename="part.stl" if (ok or "").lower() == "stl" else "part.step"
     )
 
 

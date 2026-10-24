@@ -124,20 +124,29 @@ def check_export_filename(filename: str) -> str:
     return filename
 
 
-def check_export_format(format: str | None, filename: str | None = None) -> None:
-    """STL never crosses: binary bytes vs. the UTF-8-only artifact store.
+#: Export formats the shim serves. ``None`` means "let upstream infer from the
+#: extension" (STEP for ``.step``/``.stp``, binary STL for ``.stl``).
+_SUPPORTED_EXPORT_FORMATS = frozenset({"STEP", "STL"})
 
-    Both an explicit ``format="STL"`` and an omitted format with an ``.stl``
-    filename (which upstream would infer as binary STL) fail as ``isError``
-    naming STEP, the supported interchange format.
+
+def check_export_format(format: str | None, filename: str | None = None) -> str:
+    """Validate the requested export format; return the normalized form.
+
+    STL crosses base64-encoded (binary bytes are not valid artifact text,
+    but base64 is): the payload block of the result carries the encoding.
+    Unknown explicit formats fail as ``isError``.
     """
-    if format is not None and str(format).upper() == "STL":
-        raise UnsupportedFormatError("STL is not served in v1 (binary); request STEP")
-    if (format is None or not str(format).strip()) and filename is not None:
-        if filename.lower().endswith(".stl"):
-            raise UnsupportedFormatError(
-                "STL is not served in v1 (binary); request STEP"
-            )
+    name = "" if format is None else str(format).strip().upper()
+    if not name and filename is not None:
+        lowered = filename.lower()
+        if lowered.endswith(".stl"):
+            return "STL"
+        return "STEP"
+    if name in _SUPPORTED_EXPORT_FORMATS:
+        return name
+    raise UnsupportedFormatError(
+        f"unsupported export format {format!r}; supported: STEP, STL"
+    )
 
 
 def export_target_path(root: Path, filename: str) -> Path:
