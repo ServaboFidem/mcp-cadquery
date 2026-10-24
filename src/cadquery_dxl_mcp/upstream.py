@@ -30,9 +30,10 @@ import io
 import logging
 import os
 import sys
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from .errors import UpstreamImportError, UpstreamToolError
 
@@ -84,6 +85,55 @@ def _upstream_roots() -> list[str]:
     return [str(entry) for entry in candidates if entry.is_dir()]
 
 
+def _deployed_workspace_python(workspace_path: str) -> str:
+    """Run scripts with the service venv instead of a per-call workspace venv.
+
+    Local dxl fork delta (vs upstream eae44ca8): upstream's
+    ``prepare_workspace_env`` requires ``uv`` on PATH and, on EVERY
+    ``execute_cadquery_script`` call, runs ``uv pip install cadquery``
+    (unpinned, network) plus per-workspace venv creation. None of that can
+    work in the deployed child: it runs as LocalSystem with ``-I``, no ``uv``
+    on PATH, no network guarantee -- and runtime installs into a hardened
+    tree contradict the install-time-build invariant (the same reason agent
+    tasks pass ``--no-sync``). The deployed venv already carries the pinned
+    stack (``cadquery==2.5.2``), so the workspace only needs its directory
+    to exist; every subdirectory the runner needs (``.cq_results``,
+    ``modules/``, ``shapes/``) is created with ``exist_ok=True`` by upstream
+    itself. ``requirements.txt`` in the workspace is IGNORED in v1 (no
+    runtime installs, same policy as the excluded
+    ``install_workspace_package``); custom code still loads via ``modules/``.
+    """
+    if not os.path.isdir(workspace_path):
+        raise FileNotFoundError(
+            f"Workspace path does not exist or is not a directory: {workspace_path}"
+        )
+    log.info(
+        "workspace venv provisioning disabled by deployment policy; "
+        "executing with the service interpreter",
+        extra={"event": "workspace_runtime_reuse", "workspace": workspace_path},
+    )
+    return sys.executable
+
+
+def _apply_deployed_runtime(handlers: Any, extra: str | None) -> None:
+    """Point the seam at the service interpreter (see above).
+
+    ``handlers`` did ``from ...env_setup import prepare_workspace_env``, so
+    the name must be rebound on the handlers module (and on ``env_setup``
+    itself for hygiene). Skipped when the hatch names an alternate tree:
+    tests point the loader at the fixture fake, which carries its own
+    seam, and must not be rebound.
+    """
+    if extra is not None:
+        return
+    handlers.prepare_workspace_env = _deployed_workspace_python
+    try:
+        env_setup = importlib.import_module("mcp_cadquery_server.env_setup")
+    except ImportError:
+        return
+    env_setup.prepare_workspace_env = _deployed_workspace_python
+
+
 def load_upstream() -> Upstream:
     """Import the upstream seam lazily. Importing this module never touches OCC."""
     extra = upstream_src_override()
@@ -121,6 +171,7 @@ def load_upstream() -> Upstream:
         ) from None
     if not callable(process_tool_request) or not isinstance(tool_handlers, dict):
         raise UpstreamImportError("upstream seam has an unexpected shape")
+    _apply_deployed_runtime(handlers, extra)
     return Upstream(
         process_tool_request=process_tool_request,
         tool_handlers=tool_handlers,

@@ -10,8 +10,11 @@ CWD), so without this the backend exits with
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from cadquery_dxl_mcp import upstream
 
 
@@ -28,3 +31,25 @@ def test_upstream_roots_point_at_this_checkout():
     roots = upstream._upstream_roots()
     here = Path(upstream.__file__).resolve()
     assert Path(roots[1]) == here.parent.parent.parent
+
+
+def test_deployed_workspace_python_returns_service_interpreter(tmp_path):
+    assert upstream._deployed_workspace_python(str(tmp_path)) == sys.executable
+
+
+def test_deployed_workspace_python_fails_closed_on_missing_dir(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        upstream._deployed_workspace_python(str(tmp_path / "nope"))
+
+
+def test_apply_deployed_runtime_rebinds_handlers_seam():
+    handlers = SimpleNamespace(prepare_workspace_env=object())
+    upstream._apply_deployed_runtime(handlers, None)
+    assert handlers.prepare_workspace_env is upstream._deployed_workspace_python
+
+
+def test_apply_deployed_runtime_leaves_hatch_tree_alone():
+    sentinel = object()
+    handlers = SimpleNamespace(prepare_workspace_env=sentinel)
+    upstream._apply_deployed_runtime(handlers, "/fake/upstream")
+    assert handlers.prepare_workspace_env is sentinel
