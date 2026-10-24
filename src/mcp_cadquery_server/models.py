@@ -1,5 +1,12 @@
 from typing import List, Dict, Any, Optional, Union
-from pydantic import BaseModel, Field, root_validator
+from pydantic import BaseModel, Field, model_validator
+# Local dxl fork delta (ServaboFidem/mcp-cadquery, vs upstream eae44ca8):
+# upstream used pydantic v1 `@root_validator` here, which pydantic v2
+# rejects at import time. The FastMCP shim shares its process with the MCP
+# SDK (`mcp>=2.2` requires pydantic v2), so the validator is ported to the
+# v2 `@model_validator(mode="after")` instead of pinning pydantic<2.
+# Behavior is unchanged: same checks, ValueError still surfaces as a
+# ValidationError to the shim's argument handling.
 
 
 class ExecuteCadqueryScriptArgs(BaseModel):
@@ -12,9 +19,9 @@ class ExecuteCadqueryScriptArgs(BaseModel):
         None, description="Single parameter dictionary (converted to parameter_sets internally)"
     )
 
-    @root_validator
-    def check_params(cls, values):
-        param_sets, params = values.get('parameter_sets'), values.get('parameters')
+    @model_validator(mode="after")
+    def check_params(self):
+        param_sets, params = self.parameter_sets, self.parameters
         if param_sets is not None:
             if not isinstance(param_sets, list):
                 raise ValueError("'parameter_sets' must be a list of dictionaries")
@@ -22,7 +29,7 @@ class ExecuteCadqueryScriptArgs(BaseModel):
                 raise ValueError("Each item in 'parameter_sets' must be a dictionary")
         if params is not None and not isinstance(params, dict):
             raise ValueError("'parameters' must be a dictionary")
-        return values
+        return self
 
 
 class ExportShapeArgs(BaseModel):

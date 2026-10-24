@@ -66,6 +66,24 @@ def upstream_src_override() -> str | None:
     return value or None
 
 
+def _upstream_roots() -> list[str]:
+    """Candidate ``sys.path`` entries for the upstream import.
+
+    Upstream is a ``src``-layout tree whose modules ALSO use absolute
+    ``src.mcp_cadquery_server.*`` imports (see ``handlers.py``), so BOTH
+    directories are needed: ``<root>/src`` exposes the top-level
+    ``mcp_cadquery_server`` package, and ``<root>`` exposes the ``src``
+    namespace the absolute imports resolve against. The deployed tree is
+    the same layout (robocopy of the submodule), and the service spawns
+    with ``-I`` (no CWD on the path), so neither is importable without
+    this. Returns the entries that exist, src-first.
+    """
+    here = Path(__file__).resolve()
+    root = here.parent.parent.parent
+    candidates = [root / "src", root]
+    return [str(entry) for entry in candidates if entry.is_dir()]
+
+
 def load_upstream() -> Upstream:
     """Import the upstream seam lazily. Importing this module never touches OCC."""
     extra = upstream_src_override()
@@ -80,11 +98,11 @@ def load_upstream() -> Upstream:
             pass
         sys.path.insert(0, extra)
     else:
-        # Sibling-checkout fallback: <mcps/cadquery>/src next to this package.
-        here = Path(__file__).resolve()
-        sibling = here.parent.parent.parent / "mcp_cadquery_server"
-        if sibling.is_dir():
-            sys.path.insert(0, str(sibling.parent))
+        # Sibling-checkout fallback: the deployed (or repo) tree next to
+        # this package. Both entries matter -- see _upstream_roots.
+        for entry in _upstream_roots():
+            if entry not in sys.path:
+                sys.path.append(entry)
     try:
         mcp_api = importlib.import_module("mcp_cadquery_server.mcp_api")
         handlers = importlib.import_module("mcp_cadquery_server.handlers")
